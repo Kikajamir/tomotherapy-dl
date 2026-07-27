@@ -1,0 +1,110 @@
+# =====================================================================
+# Data artifacts (raw + processed) — never track patient data
+# =====================================================================
+processed_data.pkl
+*.pkl
+*.pickle
+data/raw/
+data/*.csv
+*.dcm
+
+# =====================================================================
+# Model checkpoints / weights
+# =====================================================================
+*.pth
+*.pt
+*.ckpt
+*.onnx
+*.h5
+checkpoints/
+best_generator_residual.pth
+
+# =====================================================================
+# Evaluation / training outputs
+# =====================================================================
+evaluation_results/
+outputs/
+runs/
+logs/
+*.log
+*.npy
+*.npz
+patient_metrics.csv
+overall_metrics.csv
+*.png
+*.jpg
+*.jpeg
+!docs/**/*.png
+
+# TensorBoard / experiment tracking
+tb_logs/
+lightning_logs/
+wandb/
+mlruns/
+
+# =====================================================================
+# Kaggle / notebook execution artifacts
+# =====================================================================
+.virtual_documents/
+kaggle/working/
+*.ipynb_checkpoints/
+.ipynb_checkpoints/
+
+# =====================================================================
+# Python
+# =====================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.conda/
+
+# Env / secrets
+.env
+.env.*
+*.pem
+*.key
+
+# =====================================================================
+# Test / lint / type-check caches
+# =====================================================================
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# =====================================================================
+# OS / editor
+# =====================================================================
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# =====================================================================
+# Explicitly keep tracked (source, notebooks, configs)
+# =====================================================================
+!*.py
+!*.ipynb
+!requirements.txt
+!pytest.ini
+!README.md
+!CLAUDE.md
