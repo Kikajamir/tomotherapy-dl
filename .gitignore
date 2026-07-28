@@ -7,6 +7,7 @@ processed_data.pkl
 data/raw/
 data/*.csv
 *.dcm
+metadata/
 
 # =====================================================================
 # Model checkpoints / weights
@@ -31,6 +32,7 @@ logs/
 *.npz
 patient_metrics.csv
 overall_metrics.csv
+training_history.json
 *.png
 *.jpg
 *.jpeg
@@ -108,3 +110,25 @@ Desktop.ini
 !pytest.ini
 !README.md
 !CLAUDE.md
+
+# Raw Tomotherapy dataset
+DA exit data_new/
+
+# Processed data
+*.pkl
+
+# Model checkpoints
+*.pth
+*.pt
+
+# Outputs
+evaluation_results/
+outputs/
+logs/
+
+# Python
+__pycache__/
+*.pyc
+
+# VS Code
+.vscode/
