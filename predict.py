@@ -35,6 +35,7 @@ from evaluation.evaluate import (
     compute_metrics,
     save_results,
 )
+from evaluation.projection_profiles import generate_projection_profile_analysis
 
 
 def save_comparison_figures(reconstructed_results, output_dir):
@@ -95,6 +96,8 @@ def main():
                          help=f"Where to save predictions/metrics/figures (default: {EVAL_SAVE_DIR}).")
     parser.add_argument("--no-figures", action="store_true",
                          help="Skip saving comparison/error-map PNGs (metrics + .npy arrays are always saved).")
+    parser.add_argument("--no-projection-profiles", action="store_true",
+                         help="Skip generating per-patient detector projection profile figures/CSV.")
     args = parser.parse_args()
 
     _, _, test_data = load_and_split_patients(data_path=args.data_path)
@@ -110,6 +113,9 @@ def main():
 
     if not args.no_figures:
         save_comparison_figures(reconstructed_results, args.output_dir)
+
+    if not args.no_projection_profiles:
+        generate_projection_profile_analysis(save_dir=args.output_dir)
 
 
 if __name__ == "__main__":
