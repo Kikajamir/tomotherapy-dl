@@ -30,6 +30,7 @@ from configs.config import (
     NUM_RES_BLOCKS,
 )
 from model.generator import Generator
+from evaluation.projection_profiles import generate_projection_profile_analysis
 
 
 # =====================================================================
@@ -514,6 +515,8 @@ def evaluate(test_data, checkpoint_path=SAVE_PATH, save_dir=EVAL_SAVE_DIR):
     print(summary)
 
     save_results(reconstructed_results, metrics_df, summary, save_dir)
+
+    generate_projection_profile_analysis(save_dir=save_dir)
 
     return reconstructed_results, metrics_df, summary
 
