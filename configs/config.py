@@ -116,6 +116,19 @@ LOSS_ALPHA = 11.0
 LOSS_GAMMA = 2.5
 
 # ---------------------------------------------------------------------
+# Loss selection (ablation study: baseline vs. Weighted L1)
+# ---------------------------------------------------------------------
+# "l1" keeps the existing baseline loss (WeightedHuberLoss, untouched,
+# see LOSS_DELTA/ALPHA/GAMMA above) so the default training behavior is
+# unchanged; "weighted_l1" switches to WeightedL1Loss.
+LOSS_TYPE = "l1"
+WEIGHTED_L1_ALPHA = 2.0
+
+# Ablation checkpoints are written outside SAVE_PATH so the baseline
+# checkpoint is never overwritten by an ablation run.
+WEIGHTED_L1_SAVE_PATH = "experiments/weighted_l1/best_generator_residual.pth"
+
+# ---------------------------------------------------------------------
 # Patient-wise train / val / test split
 # ---------------------------------------------------------------------
 DATA_PATH = "/kaggle/input/notebooks/kikajamir/pix2pix/processed_data.pkl"

@@ -32,11 +32,12 @@ from configs.config import (
     EPOCHS,
     EARLY_STOPPING_PATIENCE,
     SAVE_PATH,
+    LOSS_TYPE,
 )
 from data.dataset import SlidingWindowDataset
 from model.blocks import initialize_weights
 from model.generator import Generator
-from model.losses import WeightedHuberLoss
+from model.losses import WeightedHuberLoss, WeightedL1Loss
 
 
 # =====================================================================
@@ -175,6 +176,20 @@ def build_optimizer(generator, learning_rate=LEARNING_RATE, betas=BETAS):
     return torch.optim.Adam(generator.parameters(), lr=learning_rate, betas=betas)
 
 
+def build_criterion(loss_type=LOSS_TYPE):
+    """
+    Loss-function ablation switch: "l1" keeps the existing baseline loss
+    (WeightedHuberLoss, unchanged); "weighted_l1" selects the new
+    WeightedL1Loss. Nothing else about the training pipeline changes.
+    """
+    if loss_type == "l1":
+        return WeightedHuberLoss()
+    elif loss_type == "weighted_l1":
+        return WeightedL1Loss()
+    else:
+        raise ValueError(f"Unknown loss_type: {loss_type!r} (expected 'l1' or 'weighted_l1')")
+
+
 # =====================================================================
 # Training Loop
 # =====================================================================
@@ -200,6 +215,7 @@ def train(
 
     train_history = []
     val_history = []
+    val_mae_history = []
 
     use_amp = device.type == "cuda"
 
@@ -244,6 +260,7 @@ def train(
         generator.eval()
 
         running_val_loss = 0.0
+        running_val_mae = 0.0
 
         with torch.no_grad():
             for planned, residual in val_loader:
@@ -257,13 +274,17 @@ def train(
                 ):
                     predicted_residual = generator(planned)
                     loss = criterion(predicted_residual, residual)
+                    mae = (predicted_residual - residual).abs().mean()
 
                 running_val_loss += loss.item()
+                running_val_mae += mae.item()
 
         epoch_val_loss = running_val_loss / len(val_loader)
+        epoch_val_mae = running_val_mae / len(val_loader)
 
         train_history.append(epoch_train_loss)
         val_history.append(epoch_val_loss)
+        val_mae_history.append(epoch_val_mae)
 
         # Save Best Model
         if epoch_val_loss < best_val_loss:
@@ -282,7 +303,8 @@ def train(
         print(
             f"Epoch {epoch+1:03d} | "
             f"Train {epoch_train_loss:.6f} | "
-            f"Val {epoch_val_loss:.6f} | "
+            f"Val (weighted) {epoch_val_loss:.6f} | "
+            f"Val MAE (unweighted) {epoch_val_mae:.6f} | "
             f"LR {current_lr:.2e} "
             f"{model_status}"
         )
@@ -296,7 +318,7 @@ def train(
     print(f"Best Model Saved To  : {save_path}")
     print(f"Epochs Completed     : {len(train_history)}")
 
-    return train_history, val_history
+    return train_history, val_history, val_mae_history
 
 
 # =====================================================================
@@ -312,9 +334,9 @@ def main():
 
     generator = build_generator()
     optimizer = build_optimizer(generator)
-    criterion = WeightedHuberLoss()
+    criterion = build_criterion()
 
-    train_history, val_history = train(
+    train_history, val_history, val_mae_history = train(
         generator, optimizer, criterion, train_loader, val_loader
     )
 
