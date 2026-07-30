@@ -4,12 +4,15 @@ Kaggle-ready training entry point.
 Thin CLI wrapper around `training.train` -- reuses the existing
 patient-wise split, `SlidingWindowDataset`, Attention U-Net, Adam
 optimizer, and AMP training loop exactly as implemented. `--loss-type`
-selects between the baseline loss (WeightedHuberLoss, unchanged) and the
-WeightedL1Loss ablation (see `configs.config.LOSS_TYPE`); nothing else
-about the model, optimizer, or training methodology changes. Also makes
-the PKL path and output paths configurable from the command line (or the
-environment), so the same script runs unchanged locally and on Kaggle --
-the dataset path is the only thing that needs to differ there.
+selects between the baseline loss (WeightedHuberLoss, unchanged), the
+WeightedL1Loss ablation, and the WeightedHuberGradientLoss ablation (see
+`configs.config.LOSS_TYPE`); nothing else about the model, optimizer, or
+training methodology changes. Also makes the PKL path and output paths
+configurable from the command line (or the environment), so the same
+script runs unchanged locally and on Kaggle -- the dataset path is the
+only thing that needs to differ there (`configs.config.DATA_PATH`
+defaults to the Kaggle input path but honors a `TOMOQA_DATA_PATH`
+environment variable, and `--data-path` below overrides both).
 
 No preprocessing happens here. `--data-path` must point at an already
 generated `processed_data.pkl` (see `run_pipeline.py`).
@@ -17,7 +20,8 @@ generated `processed_data.pkl` (see `run_pipeline.py`).
 Usage:
     python train.py --data-path processed_data.pkl
     python train.py --data-path /kaggle/input/<dataset-name>/processed_data.pkl
-    python train.py --loss-type weighted_l1   # ablation run, see LOSS_TYPE
+    python train.py --loss-type weighted_l1     # ablation run, see LOSS_TYPE
+    python train.py --loss-type huber_gradient  # ablation run, see LOSS_TYPE
 """
 
 import argparse
@@ -26,7 +30,13 @@ import os
 
 import torch
 
-from configs.config import DATA_PATH, SAVE_PATH, WEIGHTED_L1_SAVE_PATH, LOSS_TYPE
+from configs.config import (
+    DATA_PATH,
+    SAVE_PATH,
+    WEIGHTED_L1_SAVE_PATH,
+    HUBER_GRADIENT_SAVE_PATH,
+    LOSS_TYPE,
+)
 from training.train import (
     load_and_split_patients,
     build_dataloaders,
@@ -65,24 +75,31 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-path", default=DATA_PATH,
                          help=f"Path to processed_data.pkl (default: {DATA_PATH}).")
-    parser.add_argument("--loss-type", default=LOSS_TYPE, choices=["l1", "weighted_l1"],
+    parser.add_argument("--loss-type", default=LOSS_TYPE,
+                         choices=["l1", "weighted_l1", "huber_gradient"],
                          help=f"Loss ablation switch (default: {LOSS_TYPE!r}). "
                               "'l1' is the unchanged baseline (WeightedHuberLoss); "
-                              "'weighted_l1' selects WeightedL1Loss.")
+                              "'weighted_l1' selects WeightedL1Loss; "
+                              "'huber_gradient' selects WeightedHuberGradientLoss "
+                              "(WeightedHuberLoss + lambda_gradient * GradientLoss).")
     parser.add_argument("--save-path", default=None,
                          help="Where to save the best checkpoint. Defaults to "
-                              f"{SAVE_PATH!r} for --loss-type l1, or "
-                              f"{WEIGHTED_L1_SAVE_PATH!r} for --loss-type weighted_l1, "
-                              "so an ablation run never overwrites the baseline checkpoint.")
+                              f"{SAVE_PATH!r} for --loss-type l1, "
+                              f"{WEIGHTED_L1_SAVE_PATH!r} for --loss-type weighted_l1, or "
+                              f"{HUBER_GRADIENT_SAVE_PATH!r} for --loss-type huber_gradient, "
+                              "so an ablation run never overwrites another experiment's checkpoint.")
     parser.add_argument("--history-path", default="training_history.json",
                          help="Where to save per-epoch train/val loss as JSON.")
     parser.add_argument("--loss-curve-path", default="loss_curve.png",
                          help="Where to save the loss-curve PNG.")
     args = parser.parse_args()
 
-    save_path = args.save_path or (
-        WEIGHTED_L1_SAVE_PATH if args.loss_type == "weighted_l1" else SAVE_PATH
-    )
+    default_save_paths = {
+        "l1": SAVE_PATH,
+        "weighted_l1": WEIGHTED_L1_SAVE_PATH,
+        "huber_gradient": HUBER_GRADIENT_SAVE_PATH,
+    }
+    save_path = args.save_path or default_save_paths[args.loss_type]
     save_dir = os.path.dirname(save_path)
     if save_dir:
         os.makedirs(save_dir, exist_ok=True)

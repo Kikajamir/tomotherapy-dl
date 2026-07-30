@@ -15,6 +15,8 @@ was actually used to train the model is 2e-4. That is the only value
 kept here to avoid silently reintroducing a dead/unused constant.
 """
 
+import os
+
 import torch
 
 # =====================================================================
@@ -116,22 +118,39 @@ LOSS_ALPHA = 11.0
 LOSS_GAMMA = 2.5
 
 # ---------------------------------------------------------------------
-# Loss selection (ablation study: baseline vs. Weighted L1)
+# Loss selection (ablation study: baseline vs. Weighted L1 vs.
+# Huber + Gradient)
 # ---------------------------------------------------------------------
 # "l1" keeps the existing baseline loss (WeightedHuberLoss, untouched,
 # see LOSS_DELTA/ALPHA/GAMMA above) so the default training behavior is
-# unchanged; "weighted_l1" switches to WeightedL1Loss.
-LOSS_TYPE = "weighted_l1"  # "l1" or "weighted_l1"
+# unchanged; "weighted_l1" switches to WeightedL1Loss (previous
+# experiment); "huber_gradient" switches to WeightedHuberGradientLoss
+# (WeightedHuberLoss + lambda_gradient * GradientLoss, current
+# experiment).
+LOSS_TYPE = "huber_gradient"  # "l1", "weighted_l1", or "huber_gradient"
 WEIGHTED_L1_ALPHA = 2.0
+
+# Weight of the image-gradient term added on top of the unchanged
+# WeightedHuberLoss: TotalLoss = WeightedHuberLoss + LOSS_GRADIENT_LAMBDA
+# * GradientLoss.
+LOSS_GRADIENT_LAMBDA = 0.1
 
 # Ablation checkpoints are written outside SAVE_PATH so the baseline
 # checkpoint is never overwritten by an ablation run.
 WEIGHTED_L1_SAVE_PATH = "experiments/weighted_l1/best_generator_residual.pth"
+HUBER_GRADIENT_SAVE_PATH = "experiments/huber_gradient/best_generator_residual.pth"
 
 # ---------------------------------------------------------------------
 # Patient-wise train / val / test split
 # ---------------------------------------------------------------------
-DATA_PATH = "/kaggle/input/notebooks/kikajamir/pix2pix/processed_data.pkl"
+# TOMOQA_DATA_PATH overrides this for local development so the Kaggle
+# input path below (the default used on Kaggle) never has to be edited
+# to run locally -- see also train.py's --data-path CLI flag, which
+# takes precedence over both.
+DATA_PATH = os.environ.get(
+    "TOMOQA_DATA_PATH",
+    "/kaggle/input/datasets/kikajamir/tomotherapy-processed-v1/processed_data.pkl",
+)
 
 TRAIN_RATIO = 0.70
 VAL_RATIO = 0.15

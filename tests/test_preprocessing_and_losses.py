@@ -13,7 +13,12 @@ from preprocessing.build_dataset import (
     normalize,
     build_coordinate_system,
 )
-from model.losses import WeightedHuberLoss, WeightedL1Loss
+from model.losses import (
+    WeightedHuberLoss,
+    WeightedL1Loss,
+    GradientLoss,
+    WeightedHuberGradientLoss,
+)
 from training.train import build_criterion
 
 
@@ -113,6 +118,87 @@ def test_build_criterion_weighted_l1_returns_weighted_l1_loss():
     assert isinstance(build_criterion("weighted_l1"), WeightedL1Loss)
 
 
+def test_build_criterion_huber_gradient_returns_weighted_huber_gradient_loss():
+    assert isinstance(build_criterion("huber_gradient"), WeightedHuberGradientLoss)
+
+
 def test_build_criterion_rejects_unknown_loss_type():
     with pytest.raises(ValueError):
         build_criterion("bogus")
+
+
+def test_gradient_loss_is_zero_for_perfect_prediction():
+    criterion = GradientLoss()
+    target = torch.rand(4, 1, 16, 16)
+    loss = criterion(target, target)
+    assert torch.isclose(loss, torch.tensor(0.0), atol=1e-6)
+
+
+def test_gradient_loss_matches_manual_finite_difference_formula():
+    criterion = GradientLoss()
+
+    target = torch.arange(12, dtype=torch.float32).reshape(1, 1, 3, 4)
+    pred = target + torch.tensor(
+        [[0.0, 1.0, 0.0, -1.0],
+         [1.0, 0.0, -1.0, 0.0],
+         [0.0, -1.0, 1.0, 0.0]]
+    ).reshape(1, 1, 3, 4)
+
+    pred_dy = pred[..., 1:, :] - pred[..., :-1, :]
+    target_dy = target[..., 1:, :] - target[..., :-1, :]
+    pred_dx = pred[..., :, 1:] - pred[..., :, :-1]
+    target_dx = target[..., :, 1:] - target[..., :, :-1]
+
+    expected = (pred_dy - target_dy).abs().mean() + (pred_dx - target_dx).abs().mean()
+
+    assert torch.isclose(criterion(pred, target), expected, atol=1e-6)
+
+
+def test_gradient_loss_is_translation_invariant():
+    criterion = GradientLoss()
+
+    target = torch.rand(2, 1, 8, 10)
+    pred = torch.rand(2, 1, 8, 10)
+
+    baseline = criterion(pred, target)
+    shifted = criterion(pred + 5.0, target + 5.0)
+
+    assert torch.isclose(baseline, shifted, atol=1e-6)
+
+
+def test_weighted_huber_gradient_loss_is_zero_for_perfect_prediction():
+    criterion = WeightedHuberGradientLoss()
+    target = torch.rand(4, 1, 16, 16)
+    loss = criterion(target, target)
+    assert torch.isclose(loss, torch.tensor(0.0), atol=1e-6)
+
+
+def test_weighted_huber_gradient_loss_matches_huber_plus_lambda_gradient():
+    criterion = WeightedHuberGradientLoss(lambda_gradient=0.1)
+
+    target = torch.rand(2, 1, 8, 10)
+    pred = target + 0.05 * torch.randn(2, 1, 8, 10)
+
+    huber = WeightedHuberLoss()(pred, target)
+    gradient = GradientLoss()(pred, target)
+    expected_total = huber + 0.1 * gradient
+
+    total, huber_component, gradient_component = criterion.component_losses(pred, target)
+
+    assert torch.isclose(total, expected_total, atol=1e-6)
+    assert torch.isclose(huber_component, huber, atol=1e-6)
+    assert torch.isclose(gradient_component, gradient, atol=1e-6)
+    assert torch.isclose(criterion(pred, target), expected_total, atol=1e-6)
+
+
+def test_weighted_huber_gradient_loss_component_losses_sum_matches_forward():
+    criterion = WeightedHuberGradientLoss()
+
+    target = torch.rand(2, 1, 8, 10)
+    pred = target + 0.1 * torch.randn(2, 1, 8, 10)
+
+    total, huber_component, gradient_component = criterion.component_losses(pred, target)
+
+    assert torch.isclose(
+        total, huber_component + criterion.lambda_gradient * gradient_component, atol=1e-6
+    )

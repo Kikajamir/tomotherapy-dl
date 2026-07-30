@@ -37,7 +37,7 @@ from configs.config import (
 from data.dataset import SlidingWindowDataset
 from model.blocks import initialize_weights
 from model.generator import Generator
-from model.losses import WeightedHuberLoss, WeightedL1Loss
+from model.losses import WeightedHuberLoss, WeightedL1Loss, WeightedHuberGradientLoss
 
 
 # =====================================================================
@@ -179,15 +179,22 @@ def build_optimizer(generator, learning_rate=LEARNING_RATE, betas=BETAS):
 def build_criterion(loss_type=LOSS_TYPE):
     """
     Loss-function ablation switch: "l1" keeps the existing baseline loss
-    (WeightedHuberLoss, unchanged); "weighted_l1" selects the new
-    WeightedL1Loss. Nothing else about the training pipeline changes.
+    (WeightedHuberLoss, unchanged); "weighted_l1" selects WeightedL1Loss;
+    "huber_gradient" selects WeightedHuberGradientLoss (WeightedHuberLoss
+    + lambda_gradient * GradientLoss). Nothing else about the training
+    pipeline changes.
     """
     if loss_type == "l1":
         return WeightedHuberLoss()
     elif loss_type == "weighted_l1":
         return WeightedL1Loss()
+    elif loss_type == "huber_gradient":
+        return WeightedHuberGradientLoss()
     else:
-        raise ValueError(f"Unknown loss_type: {loss_type!r} (expected 'l1' or 'weighted_l1')")
+        raise ValueError(
+            f"Unknown loss_type: {loss_type!r} "
+            "(expected 'l1', 'weighted_l1', or 'huber_gradient')"
+        )
 
 
 # =====================================================================
@@ -259,8 +266,12 @@ def train(
         # Validation
         generator.eval()
 
+        log_components = hasattr(criterion, "component_losses")
+
         running_val_loss = 0.0
         running_val_mae = 0.0
+        running_val_huber = 0.0
+        running_val_gradient = 0.0
 
         with torch.no_grad():
             for planned, residual in val_loader:
@@ -273,7 +284,16 @@ def train(
                     enabled=use_amp,
                 ):
                     predicted_residual = generator(planned)
-                    loss = criterion(predicted_residual, residual)
+
+                    if log_components:
+                        loss, huber_component, gradient_component = (
+                            criterion.component_losses(predicted_residual, residual)
+                        )
+                        running_val_huber += huber_component.item()
+                        running_val_gradient += gradient_component.item()
+                    else:
+                        loss = criterion(predicted_residual, residual)
+
                     mae = (predicted_residual - residual).abs().mean()
 
                 running_val_loss += loss.item()
@@ -300,14 +320,29 @@ def train(
 
         current_lr = optimizer.param_groups[0]["lr"]
 
-        print(
-            f"Epoch {epoch+1:03d} | "
-            f"Train {epoch_train_loss:.6f} | "
-            f"Val (weighted) {epoch_val_loss:.6f} | "
-            f"Val MAE (unweighted) {epoch_val_mae:.6f} | "
-            f"LR {current_lr:.2e} "
-            f"{model_status}"
-        )
+        if log_components:
+            epoch_val_huber = running_val_huber / len(val_loader)
+            epoch_val_gradient = running_val_gradient / len(val_loader)
+
+            print(
+                f"Epoch {epoch+1:03d} | "
+                f"Train {epoch_train_loss:.6f} | "
+                f"Val Total {epoch_val_loss:.6f} | "
+                f"Val Huber {epoch_val_huber:.6f} | "
+                f"Val Gradient {epoch_val_gradient:.6f} | "
+                f"Val MAE {epoch_val_mae:.6f} | "
+                f"LR {current_lr:.2e} "
+                f"{model_status}"
+            )
+        else:
+            print(
+                f"Epoch {epoch+1:03d} | "
+                f"Train {epoch_train_loss:.6f} | "
+                f"Val (weighted) {epoch_val_loss:.6f} | "
+                f"Val MAE (unweighted) {epoch_val_mae:.6f} | "
+                f"LR {current_lr:.2e} "
+                f"{model_status}"
+            )
 
         if epochs_without_improvement >= early_stopping_patience:
             print("Early stopping triggered.")
