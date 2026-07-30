@@ -121,7 +121,7 @@ LOSS_GAMMA = 2.5
 # "l1" keeps the existing baseline loss (WeightedHuberLoss, untouched,
 # see LOSS_DELTA/ALPHA/GAMMA above) so the default training behavior is
 # unchanged; "weighted_l1" switches to WeightedL1Loss.
-LOSS_TYPE = "l1"
+LOSS_TYPE = "weighted_l1"  # "l1" or "weighted_l1"
 WEIGHTED_L1_ALPHA = 2.0
 
 # Ablation checkpoints are written outside SAVE_PATH so the baseline
