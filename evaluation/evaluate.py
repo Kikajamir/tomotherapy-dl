@@ -519,7 +519,15 @@ def evaluate(test_data, checkpoint_path=SAVE_PATH, save_dir=EVAL_SAVE_DIR):
 
 
 if __name__ == "__main__":
+    import argparse
+
     from training.train import load_and_split_patients
 
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--checkpoint", default=SAVE_PATH,
+                         help=f"Path to a generator checkpoint to evaluate "
+                              f"(default: {SAVE_PATH!r}).")
+    args = parser.parse_args()
+
     _, _, test_data = load_and_split_patients()
-    evaluate(test_data)
+    evaluate(test_data, checkpoint_path=args.checkpoint)
