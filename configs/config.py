@@ -107,7 +107,7 @@ GROUPS = 8                  # GroupNorm groups
 # behavior -- the predicted residual is unbounded); "sigmoid" adds an
 # optional final nn.Sigmoid to constrain the output to the physical
 # detector range [0,1]. Purely additive -- see model/generator.py.
-OUTPUT_ACTIVATION = "linear"  # "linear" or "sigmoid"
+OUTPUT_ACTIVATION = "sigmoid"  # "linear" or "sigmoid"
 
 # ---------------------------------------------------------------------
 # Deep supervision ablation (Experiment B)
