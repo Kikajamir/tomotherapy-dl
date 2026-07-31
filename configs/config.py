@@ -101,6 +101,33 @@ NUM_RES_BLOCKS = 2          # Reduced from 4
 GROUPS = 8                  # GroupNorm groups
 
 # ---------------------------------------------------------------------
+# Output activation ablation (Experiment A: Sigmoid Output)
+# ---------------------------------------------------------------------
+# "linear" leaves the final output Conv2d unactivated (existing/default
+# behavior -- the predicted residual is unbounded); "sigmoid" adds an
+# optional final nn.Sigmoid to constrain the output to the physical
+# detector range [0,1]. Purely additive -- see model/generator.py.
+OUTPUT_ACTIVATION = "linear"  # "linear" or "sigmoid"
+
+# ---------------------------------------------------------------------
+# Deep supervision ablation (Experiment B)
+# ---------------------------------------------------------------------
+# When True, the generator exposes auxiliary 1x1-conv outputs at the
+# dec2/dec3 decoder resolutions (only while `generator.training` is
+# True, i.e. never at inference/eval), and the training loop adds
+# 0.5 * L_decoder2 + 0.25 * L_decoder3 on top of the main loss -- see
+# model/generator.py (`aux_outputs`) and training/train.py.
+USE_DEEP_SUPERVISION = False
+
+# ---------------------------------------------------------------------
+# Multi-scale loss ablation (Experiment C)
+# ---------------------------------------------------------------------
+# When True, build_criterion() returns MultiScaleLoss (plain L1 at full
+# resolution + 0.5 * L1_half + 0.25 * L1_quarter, via average pooling)
+# instead of whatever LOSS_TYPE selects -- see model/losses.py.
+USE_MULTI_SCALE_LOSS = False
+
+# ---------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------
 BATCH_SIZE = 8
@@ -133,12 +160,19 @@ WEIGHTED_L1_ALPHA = 2.0
 # Weight of the image-gradient term added on top of the unchanged
 # WeightedHuberLoss: TotalLoss = WeightedHuberLoss + LOSS_GRADIENT_LAMBDA
 # * GradientLoss.
+# (Experiment D: this is already a plain config parameter consumed as
+# WeightedHuberGradientLoss's `lambda_gradient` default -- trying 0.1 /
+# 0.25 / 0.5 / 1.0 only requires editing this value and rerunning
+# training, no other code changes.)
 LOSS_GRADIENT_LAMBDA = 0.1
 
 # Ablation checkpoints are written outside SAVE_PATH so the baseline
 # checkpoint is never overwritten by an ablation run.
 WEIGHTED_L1_SAVE_PATH = "experiments/weighted_l1/best_generator_residual.pth"
 HUBER_GRADIENT_SAVE_PATH = "experiments/huber_gradient/best_generator_residual.pth"
+SIGMOID_OUTPUT_SAVE_PATH = "experiments/sigmoid_output/best_generator_residual.pth"
+DEEP_SUPERVISION_SAVE_PATH = "experiments/deep_supervision/best_generator_residual.pth"
+MULTI_SCALE_LOSS_SAVE_PATH = "experiments/multi_scale_loss/best_generator_residual.pth"
 
 # ---------------------------------------------------------------------
 # Patient-wise train / val / test split

@@ -11,6 +11,8 @@ from configs.config import (
     BASE_CHANNELS,
     NUM_RES_BLOCKS,
     PAD_WIDTH,
+    OUTPUT_ACTIVATION,
+    USE_DEEP_SUPERVISION,
 )
 from model.blocks import (
     ConvBlock,
@@ -39,7 +41,16 @@ class Generator(nn.Module):
             |
     Center Crop
             |
+    Output Activation (optional, linear by default)
+            |
     Output (1x256x542)
+
+    Optional ablations (both off by default, see configs/config.py):
+    - `output_activation="sigmoid"` adds a final nn.Sigmoid (Experiment A).
+    - `use_deep_supervision=True` adds auxiliary 1x1-conv heads at the
+      dec2/dec3 resolutions, exposed via `self.aux_outputs` only while
+      the module is in training mode (Experiment B); inference/eval is
+      unaffected since `forward` always returns just the final tensor.
     """
 
     def __init__(
@@ -48,8 +59,16 @@ class Generator(nn.Module):
         out_channels=OUTPUT_CHANNELS,
         base_channels=BASE_CHANNELS,
         num_residual_blocks=NUM_RES_BLOCKS,
+        output_activation=OUTPUT_ACTIVATION,
+        use_deep_supervision=USE_DEEP_SUPERVISION,
     ):
         super().__init__()
+
+        if output_activation not in ("linear", "sigmoid"):
+            raise ValueError(
+                f"Unknown output_activation: {output_activation!r} "
+                "(expected 'linear' or 'sigmoid')"
+            )
 
         # Reflection Padding
         # Width: 542 -> 544
@@ -123,6 +142,22 @@ class Generator(nn.Module):
             padding=1,
         )
 
+        # Experiment A: optional output activation (default: linear, i.e.
+        # no-op -- Identity keeps state_dict/behavior unchanged).
+        self.output_activation = output_activation
+        self.activation = (
+            nn.Sigmoid() if output_activation == "sigmoid" else nn.Identity()
+        )
+
+        # Experiment B: optional deep-supervision auxiliary heads. Only
+        # constructed when requested, so a default (False) Generator's
+        # state_dict is byte-for-byte unchanged from before this ablation.
+        self.use_deep_supervision = use_deep_supervision
+        self.aux_outputs = None
+        if use_deep_supervision:
+            self.aux_output2 = nn.Conv2d(base_channels * 2, out_channels, kernel_size=1)
+            self.aux_output3 = nn.Conv2d(base_channels * 4, out_channels, kernel_size=1)
+
     def forward(self, x):
         # Save original size
         original_width = x.shape[-1]
@@ -155,8 +190,13 @@ class Generator(nn.Module):
         # Decoder
         # ================================================
         x = self.dec4(x, s4)
+
         x = self.dec3(x, s3)
+        dec3_features = x
+
         x = self.dec2(x, s2)
+        dec2_features = x
+
         x = self.dec1(x, s1)
 
         # ================================================
@@ -166,5 +206,19 @@ class Generator(nn.Module):
 
         # Remove reflection padding
         x = x[..., PAD_WIDTH:PAD_WIDTH + original_width]
+
+        x = self.activation(x)
+
+        # Experiment B: auxiliary decoder outputs, training only -- never
+        # populated at inference/eval, so `forward` always returns just
+        # the final tensor and callers (e.g. evaluation/evaluate.py) are
+        # unaffected regardless of this flag.
+        if self.use_deep_supervision and self.training:
+            self.aux_outputs = (
+                self.aux_output2(dec2_features),
+                self.aux_output3(dec3_features),
+            )
+        else:
+            self.aux_outputs = None
 
         return x

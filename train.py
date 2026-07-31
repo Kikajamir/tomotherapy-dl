@@ -14,6 +14,15 @@ only thing that needs to differ there (`configs.config.DATA_PATH`
 defaults to the Kaggle input path but honors a `TOMOQA_DATA_PATH`
 environment variable, and `--data-path` below overrides both).
 
+The Sigmoid Output (`OUTPUT_ACTIVATION`), Deep Supervision
+(`USE_DEEP_SUPERVISION`), and Multi-Scale Loss (`USE_MULTI_SCALE_LOSS`)
+ablations are selected purely via `configs/config.py` -- no CLI flag is
+needed for them, and each writes its checkpoint to its own
+`experiments/<name>/` directory (see `--save-path` default below) so
+running `python train.py` with no arguments after only editing
+config.py just works. Do not enable more than one ablation at a time;
+this script does not attempt to combine them.
+
 No preprocessing happens here. `--data-path` must point at an already
 generated `processed_data.pkl` (see `run_pipeline.py`).
 
@@ -35,7 +44,13 @@ from configs.config import (
     SAVE_PATH,
     WEIGHTED_L1_SAVE_PATH,
     HUBER_GRADIENT_SAVE_PATH,
+    SIGMOID_OUTPUT_SAVE_PATH,
+    DEEP_SUPERVISION_SAVE_PATH,
+    MULTI_SCALE_LOSS_SAVE_PATH,
     LOSS_TYPE,
+    OUTPUT_ACTIVATION,
+    USE_DEEP_SUPERVISION,
+    USE_MULTI_SCALE_LOSS,
 )
 from training.train import (
     load_and_split_patients,
@@ -86,28 +101,53 @@ def main():
                          help="Where to save the best checkpoint. Defaults to "
                               f"{SAVE_PATH!r} for --loss-type l1, "
                               f"{WEIGHTED_L1_SAVE_PATH!r} for --loss-type weighted_l1, or "
-                              f"{HUBER_GRADIENT_SAVE_PATH!r} for --loss-type huber_gradient, "
-                              "so an ablation run never overwrites another experiment's checkpoint.")
+                              f"{HUBER_GRADIENT_SAVE_PATH!r} for --loss-type huber_gradient "
+                              "(unless OUTPUT_ACTIVATION/USE_DEEP_SUPERVISION/"
+                              "USE_MULTI_SCALE_LOSS in configs/config.py select one of the "
+                              f"other ablations: {SIGMOID_OUTPUT_SAVE_PATH!r}, "
+                              f"{DEEP_SUPERVISION_SAVE_PATH!r}, or "
+                              f"{MULTI_SCALE_LOSS_SAVE_PATH!r} respectively), so an ablation "
+                              "run never overwrites another experiment's checkpoint.")
     parser.add_argument("--history-path", default="training_history.json",
                          help="Where to save per-epoch train/val loss as JSON.")
     parser.add_argument("--loss-curve-path", default="loss_curve.png",
                          help="Where to save the loss-curve PNG.")
     args = parser.parse_args()
 
+    # Sigmoid Output / Deep Supervision / Multi-Scale Loss are selected
+    # purely via configs/config.py (not a CLI flag) and each get their own
+    # checkpoint directory. Do not combine them -- only one is expected to
+    # be active (non-default) at a time.
+    if OUTPUT_ACTIVATION == "sigmoid":
+        config_ablation_save_path = SIGMOID_OUTPUT_SAVE_PATH
+    elif USE_DEEP_SUPERVISION:
+        config_ablation_save_path = DEEP_SUPERVISION_SAVE_PATH
+    elif USE_MULTI_SCALE_LOSS:
+        config_ablation_save_path = MULTI_SCALE_LOSS_SAVE_PATH
+    else:
+        config_ablation_save_path = None
+
     default_save_paths = {
         "l1": SAVE_PATH,
         "weighted_l1": WEIGHTED_L1_SAVE_PATH,
         "huber_gradient": HUBER_GRADIENT_SAVE_PATH,
     }
-    save_path = args.save_path or default_save_paths[args.loss_type]
+    save_path = (
+        args.save_path
+        or config_ablation_save_path
+        or default_save_paths[args.loss_type]
+    )
     save_dir = os.path.dirname(save_path)
     if save_dir:
         os.makedirs(save_dir, exist_ok=True)
 
-    print(f"CUDA available : {torch.cuda.is_available()}")
-    print(f"Data path      : {args.data_path}")
-    print(f"Loss type      : {args.loss_type}")
-    print(f"Checkpoint out : {save_path}")
+    print(f"CUDA available     : {torch.cuda.is_available()}")
+    print(f"Data path          : {args.data_path}")
+    print(f"Loss type          : {args.loss_type}")
+    print(f"Output activation  : {OUTPUT_ACTIVATION}")
+    print(f"Deep supervision   : {USE_DEEP_SUPERVISION}")
+    print(f"Multi-scale loss   : {USE_MULTI_SCALE_LOSS}")
+    print(f"Checkpoint out     : {save_path}")
 
     train_data, val_data, test_data = load_and_split_patients(data_path=args.data_path)
 

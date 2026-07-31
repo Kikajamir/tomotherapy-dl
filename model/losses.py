@@ -2,11 +2,13 @@
 Continuous Intensity Weighted Huber Loss, extracted verbatim
 (logic-wise) from `unetablation.ipynb`, plus a Weighted L1 Loss and a
 Gradient Loss added for the loss-function ablation study (see
-`configs.config.LOSS_TYPE`).
+`configs.config.LOSS_TYPE`), and a Multi-Scale Loss added for the
+multi-scale-loss ablation (see `configs.config.USE_MULTI_SCALE_LOSS`).
 """
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from configs.config import (
     LOSS_DELTA,
@@ -112,3 +114,27 @@ class WeightedHuberGradientLoss(nn.Module):
     def forward(self, pred, target):
         total, _, _ = self.component_losses(pred, target)
         return total
+
+
+class MultiScaleLoss(nn.Module):
+    """
+    Multi-scale reconstruction loss (Experiment C ablation, see
+    `configs.config.USE_MULTI_SCALE_LOSS`): plain (unweighted) L1 at full
+    resolution plus L1 at half/quarter resolution, the latter two
+    computed by average-pooling both `pred` and `target` before
+    comparing them -- TotalLoss = L1_full + 0.5 * L1_half +
+    0.25 * L1_quarter. Independent of `LOSS_TYPE`/WeightedHuberLoss.
+    """
+
+    def forward(self, pred, target):
+        full = F.l1_loss(pred, target)
+
+        half = F.l1_loss(
+            F.avg_pool2d(pred, kernel_size=2), F.avg_pool2d(target, kernel_size=2)
+        )
+
+        quarter = F.l1_loss(
+            F.avg_pool2d(pred, kernel_size=4), F.avg_pool2d(target, kernel_size=4)
+        )
+
+        return full + 0.5 * half + 0.25 * quarter

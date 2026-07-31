@@ -8,6 +8,7 @@ with early stopping and best-checkpoint saving.
 import pickle
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from sklearn.model_selection import train_test_split
 from tqdm.auto import tqdm
@@ -27,6 +28,10 @@ from configs.config import (
     OUTPUT_CHANNELS,
     BASE_CHANNELS,
     NUM_RES_BLOCKS,
+    PAD_WIDTH,
+    OUTPUT_ACTIVATION,
+    USE_DEEP_SUPERVISION,
+    USE_MULTI_SCALE_LOSS,
     LEARNING_RATE,
     BETAS,
     EPOCHS,
@@ -37,7 +42,12 @@ from configs.config import (
 from data.dataset import SlidingWindowDataset
 from model.blocks import initialize_weights
 from model.generator import Generator
-from model.losses import WeightedHuberLoss, WeightedL1Loss, WeightedHuberGradientLoss
+from model.losses import (
+    WeightedHuberLoss,
+    WeightedL1Loss,
+    WeightedHuberGradientLoss,
+    MultiScaleLoss,
+)
 
 
 # =====================================================================
@@ -159,12 +169,18 @@ def build_dataloaders(train_data, val_data, test_data,
 # Model / Optimizer
 # =====================================================================
 
-def build_generator(device=DEVICE):
+def build_generator(
+    device=DEVICE,
+    output_activation=OUTPUT_ACTIVATION,
+    use_deep_supervision=USE_DEEP_SUPERVISION,
+):
     generator = Generator(
         in_channels=INPUT_CHANNELS,
         out_channels=OUTPUT_CHANNELS,
         base_channels=BASE_CHANNELS,
         num_residual_blocks=NUM_RES_BLOCKS,
+        output_activation=output_activation,
+        use_deep_supervision=use_deep_supervision,
     ).to(device)
 
     initialize_weights(generator)
@@ -176,15 +192,18 @@ def build_optimizer(generator, learning_rate=LEARNING_RATE, betas=BETAS):
     return torch.optim.Adam(generator.parameters(), lr=learning_rate, betas=betas)
 
 
-def build_criterion(loss_type=LOSS_TYPE):
+def build_criterion(loss_type=LOSS_TYPE, use_multi_scale_loss=USE_MULTI_SCALE_LOSS):
     """
     Loss-function ablation switch: "l1" keeps the existing baseline loss
     (WeightedHuberLoss, unchanged); "weighted_l1" selects WeightedL1Loss;
     "huber_gradient" selects WeightedHuberGradientLoss (WeightedHuberLoss
-    + lambda_gradient * GradientLoss). Nothing else about the training
-    pipeline changes.
+    + lambda_gradient * GradientLoss). `use_multi_scale_loss=True`
+    (Experiment C, independent of `loss_type`) selects MultiScaleLoss
+    instead. Nothing else about the training pipeline changes.
     """
-    if loss_type == "l1":
+    if use_multi_scale_loss:
+        return MultiScaleLoss()
+    elif loss_type == "l1":
         return WeightedHuberLoss()
     elif loss_type == "weighted_l1":
         return WeightedL1Loss()
@@ -211,11 +230,21 @@ def train(
     num_epochs=EPOCHS,
     early_stopping_patience=EARLY_STOPPING_PATIENCE,
     save_path=SAVE_PATH,
+    use_deep_supervision=USE_DEEP_SUPERVISION,
 ):
     """
     Runs the AMP training loop with early stopping and best-checkpoint
     saving, exactly as in the notebook. Returns (train_history,
     val_history).
+
+    `use_deep_supervision` (Experiment B, off by default) adds
+    0.5 * L_decoder2 + 0.25 * L_decoder3 on top of the main training
+    loss, using `generator.aux_outputs` (populated only while the model
+    is in train mode) against the residual target reflection-padded and
+    average-pooled to each decoder's resolution -- see
+    `model/generator.py`. Validation/inference are unaffected: `eval()`
+    puts the generator in eval mode, so `aux_outputs` is always None
+    there regardless of this flag.
     """
     best_val_loss = float("inf")
     epochs_without_improvement = 0
@@ -252,6 +281,20 @@ def train(
             ):
                 predicted_residual = generator(planned)
                 loss = criterion(predicted_residual, residual)
+
+                if use_deep_supervision and generator.aux_outputs is not None:
+                    aux2, aux3 = generator.aux_outputs
+
+                    padded_residual = F.pad(
+                        residual, (PAD_WIDTH, PAD_WIDTH, 0, 0), mode="reflect"
+                    )
+                    target2 = F.avg_pool2d(padded_residual, kernel_size=2)
+                    target3 = F.avg_pool2d(padded_residual, kernel_size=4)
+
+                    loss_decoder2 = criterion(aux2, target2)
+                    loss_decoder3 = criterion(aux3, target3)
+
+                    loss = loss + 0.5 * loss_decoder2 + 0.25 * loss_decoder3
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)

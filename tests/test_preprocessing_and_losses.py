@@ -7,7 +7,9 @@ of which require the actual TomoTherapy CSV data to test.
 import numpy as np
 import pytest
 import torch
+import torch.nn.functional as F
 
+from configs.config import LOSS_GRADIENT_LAMBDA
 from preprocessing.build_dataset import (
     shift_image,
     normalize,
@@ -18,6 +20,7 @@ from model.losses import (
     WeightedL1Loss,
     GradientLoss,
     WeightedHuberGradientLoss,
+    MultiScaleLoss,
 )
 from training.train import build_criterion
 
@@ -202,3 +205,54 @@ def test_weighted_huber_gradient_loss_component_losses_sum_matches_forward():
     assert torch.isclose(
         total, huber_component + criterion.lambda_gradient * gradient_component, atol=1e-6
     )
+
+
+def test_weighted_huber_gradient_loss_default_lambda_matches_config():
+    # Experiment D: LOSS_GRADIENT_LAMBDA is a plain config parameter --
+    # changing it in configs/config.py (0.1 / 0.25 / 0.5 / 1.0) requires
+    # no other code changes, since this default is read fresh on import.
+    criterion = WeightedHuberGradientLoss()
+    assert criterion.lambda_gradient == LOSS_GRADIENT_LAMBDA
+
+
+def test_multi_scale_loss_is_zero_for_perfect_prediction():
+    criterion = MultiScaleLoss()
+    target = torch.rand(2, 1, 16, 16)
+    loss = criterion(target, target)
+    assert torch.isclose(loss, torch.tensor(0.0), atol=1e-6)
+
+
+def test_multi_scale_loss_matches_manual_formula():
+    criterion = MultiScaleLoss()
+
+    target = torch.rand(2, 1, 16, 16)
+    pred = target + 0.1 * torch.randn(2, 1, 16, 16)
+
+    full = F.l1_loss(pred, target)
+    half = F.l1_loss(F.avg_pool2d(pred, 2), F.avg_pool2d(target, 2))
+    quarter = F.l1_loss(F.avg_pool2d(pred, 4), F.avg_pool2d(target, 4))
+    expected = full + 0.5 * half + 0.25 * quarter
+
+    assert torch.isclose(criterion(pred, target), expected, atol=1e-6)
+
+
+def test_multi_scale_loss_handles_non_power_of_two_width():
+    # Sinogram width is 542 (not divisible by 4) -- avg_pool2d should
+    # just floor-divide rather than error.
+    criterion = MultiScaleLoss()
+    target = torch.rand(1, 1, 256, 542)
+    pred = target + 0.05 * torch.randn(1, 1, 256, 542)
+
+    loss = criterion(pred, target)
+    assert torch.isfinite(loss)
+    assert loss.item() > 0
+
+
+def test_build_criterion_multi_scale_loss_overrides_loss_type():
+    criterion = build_criterion(loss_type="huber_gradient", use_multi_scale_loss=True)
+    assert isinstance(criterion, MultiScaleLoss)
+
+
+def test_build_criterion_default_multi_scale_loss_is_off():
+    criterion = build_criterion(loss_type="l1")
+    assert not isinstance(criterion, MultiScaleLoss)
