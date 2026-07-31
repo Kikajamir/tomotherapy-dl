@@ -107,7 +107,7 @@ GROUPS = 8                  # GroupNorm groups
 # behavior -- the predicted residual is unbounded); "sigmoid" adds an
 # optional final nn.Sigmoid to constrain the output to the physical
 # detector range [0,1]. Purely additive -- see model/generator.py.
-OUTPUT_ACTIVATION = "sigmoid"  # "linear" or "sigmoid"
+OUTPUT_ACTIVATION = "linear"  # "linear" or "sigmoid"
 
 # ---------------------------------------------------------------------
 # Deep supervision ablation (Experiment B)
@@ -117,7 +117,7 @@ OUTPUT_ACTIVATION = "sigmoid"  # "linear" or "sigmoid"
 # True, i.e. never at inference/eval), and the training loop adds
 # 0.5 * L_decoder2 + 0.25 * L_decoder3 on top of the main loss -- see
 # model/generator.py (`aux_outputs`) and training/train.py.
-USE_DEEP_SUPERVISION = False
+USE_DEEP_SUPERVISION = True
 
 # ---------------------------------------------------------------------
 # Multi-scale loss ablation (Experiment C)
