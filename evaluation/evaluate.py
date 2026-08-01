@@ -28,8 +28,10 @@ from configs.config import (
     OUTPUT_CHANNELS,
     BASE_CHANNELS,
     NUM_RES_BLOCKS,
+    BEAM_THRESHOLD,
 )
 from model.generator import Generator
+from model.losses import build_beam_mask
 from evaluation.projection_profiles import generate_projection_profile_analysis
 
 
@@ -171,16 +173,22 @@ def reconstruct_patients(
 # Evaluation Metrics
 # =====================================================================
 
-def compute_metrics(reconstructed_results):
+def compute_metrics(reconstructed_results, beam_threshold=BEAM_THRESHOLD):
     """
-    Computes per-patient MAE, RMSE, PSNR, SSIM, plus a Mean/Std summary
-    across patients. Returns (metrics_df, summary_df).
+    Computes per-patient global MAE/RMSE/PSNR/SSIM, plus Beam/Background
+    MAE/RMSE using a beam mask derived from `planned` only (see
+    `model.losses.build_beam_mask` -- same mask definition used by
+    BeamAwareWeightedHuberLoss, so training and evaluation never
+    disagree on what counts as beam vs. background). Returns a Mean/Std
+    summary across patients for every metric. Returns (metrics_df,
+    summary_df).
     """
     metrics_list = []
 
     for pid, data in reconstructed_results.items():
         gt = data["ground_truth"]
         pred = data["prediction"]
+        planned = data["planned"]
 
         mae = mean_absolute_error(gt.flatten(), pred.flatten())
 
@@ -192,31 +200,50 @@ def compute_metrics(reconstructed_results):
 
         ssim = structural_similarity(gt, pred, data_range=data_range)
 
+        beam_mask = build_beam_mask(planned, beam_threshold)
+        background_mask = ~beam_mask
+
+        if beam_mask.any():
+            beam_mae = mean_absolute_error(gt[beam_mask], pred[beam_mask])
+            beam_rmse = np.sqrt(mean_squared_error(gt[beam_mask], pred[beam_mask]))
+        else:
+            beam_mae = np.nan
+            beam_rmse = np.nan
+
+        if background_mask.any():
+            background_mae = mean_absolute_error(
+                gt[background_mask], pred[background_mask]
+            )
+            background_rmse = np.sqrt(
+                mean_squared_error(gt[background_mask], pred[background_mask])
+            )
+        else:
+            background_mae = np.nan
+            background_rmse = np.nan
+
         metrics_list.append({
             "Patient": pid,
             "MAE": mae,
             "RMSE": rmse,
             "PSNR": psnr,
             "SSIM": ssim,
+            "Beam_MAE": beam_mae,
+            "Beam_RMSE": beam_rmse,
+            "Background_MAE": background_mae,
+            "Background_RMSE": background_rmse,
         })
 
     metrics_df = pd.DataFrame(metrics_list)
     metrics_df = metrics_df.sort_values("Patient").reset_index(drop=True)
 
+    summary_columns = [
+        "MAE", "RMSE", "PSNR", "SSIM",
+        "Beam_MAE", "Beam_RMSE", "Background_MAE", "Background_RMSE",
+    ]
     summary = pd.DataFrame({
-        "Metric": ["MAE", "RMSE", "PSNR", "SSIM"],
-        "Mean": [
-            metrics_df["MAE"].mean(),
-            metrics_df["RMSE"].mean(),
-            metrics_df["PSNR"].mean(),
-            metrics_df["SSIM"].mean(),
-        ],
-        "Std": [
-            metrics_df["MAE"].std(),
-            metrics_df["RMSE"].std(),
-            metrics_df["PSNR"].std(),
-            metrics_df["SSIM"].std(),
-        ],
+        "Metric": summary_columns,
+        "Mean": [metrics_df[col].mean() for col in summary_columns],
+        "Std": [metrics_df[col].std() for col in summary_columns],
     })
 
     return metrics_df, summary
@@ -466,6 +493,131 @@ def plot_detector_channel_profiles(reconstructed_results, patient_id):
     plt.suptitle(
         f"Detector Channel Profiles ({patient_id})", fontsize=18, fontweight="bold"
     )
+    plt.show()
+
+
+def plot_beam_mask(reconstructed_results, patient_id, beam_threshold=BEAM_THRESHOLD):
+    import matplotlib.pyplot as plt
+
+    data = reconstructed_results[patient_id]
+    planned = data["planned"]
+
+    beam_mask = build_beam_mask(planned, beam_threshold).astype(np.float32)
+
+    plt.figure(figsize=(7, 8))
+
+    plt.imshow(beam_mask, cmap="gray", aspect="auto", origin="lower", vmin=0, vmax=1)
+
+    plt.title(
+        f"Beam Mask (planned > {beam_threshold}) -- {patient_id}",
+        fontsize=15, fontweight="bold",
+    )
+    plt.xlabel("Detector Channel")
+    plt.ylabel("Projection")
+
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_full_diagnostic_panel(reconstructed_results, patient_id, beam_threshold=BEAM_THRESHOLD):
+    """
+    7-panel per-patient diagnostic: Planned, Ground Truth, Prediction,
+    Beam Mask (grayscale, top row); Absolute Error, Beam-only Error,
+    Background-only Error ('hot' colormap, bottom row).
+    """
+    import matplotlib.pyplot as plt
+
+    data = reconstructed_results[patient_id]
+    planned = data["planned"]
+    ground_truth = data["ground_truth"]
+    prediction = data["prediction"]
+
+    beam_mask = build_beam_mask(planned, beam_threshold)
+    error = np.abs(ground_truth - prediction)
+    beam_error = np.where(beam_mask, error, np.nan)
+    background_error = np.where(~beam_mask, error, np.nan)
+
+    vmin = min(planned.min(), ground_truth.min(), prediction.min())
+    vmax = max(planned.max(), ground_truth.max(), prediction.max())
+
+    gray_images = [planned, ground_truth, prediction, beam_mask.astype(np.float32)]
+    gray_titles = ["Planned", "Ground Truth", "Prediction", "Beam Mask"]
+    gray_ranges = [(vmin, vmax), (vmin, vmax), (vmin, vmax), (0, 1)]
+
+    error_images = [error, beam_error, background_error]
+    error_titles = ["Absolute Error", "Beam-only Error", "Background-only Error"]
+
+    fig, axes = plt.subplots(2, 4, figsize=(26, 11), constrained_layout=True)
+
+    for ax, img, title, (this_vmin, this_vmax) in zip(
+        axes[0], gray_images, gray_titles, gray_ranges
+    ):
+        im = ax.imshow(
+            img, cmap="gray", aspect="auto", origin="lower",
+            vmin=this_vmin, vmax=this_vmax,
+        )
+        ax.set_title(title, fontsize=13)
+        ax.set_xlabel("Detector Channel")
+        ax.set_ylabel("Projection")
+
+    axes[1, -1].axis("off")
+
+    for ax, img, title in zip(axes[1, :3], error_images, error_titles):
+        im = ax.imshow(img, cmap="hot", aspect="auto", origin="lower")
+        ax.set_title(title, fontsize=13)
+        ax.set_xlabel("Detector Channel")
+        ax.set_ylabel("Projection")
+        fig.colorbar(im, ax=ax, shrink=0.85)
+
+    plt.suptitle(f"Full Diagnostic Panel ({patient_id})", fontsize=18, fontweight="bold")
+    plt.show()
+
+
+def plot_projection_wise_mae(reconstructed_results, patient_id, beam_threshold=BEAM_THRESHOLD):
+    """
+    Per-projection (per-row) MAE curves -- global, beam-only, and
+    background-only -- showing whether error concentrates at specific
+    gantry angles/projections rather than being spread uniformly.
+    """
+    import matplotlib.pyplot as plt
+
+    data = reconstructed_results[patient_id]
+    gt = data["ground_truth"]
+    pred = data["prediction"]
+    planned = data["planned"]
+
+    error = np.abs(gt - pred)
+    beam_mask = build_beam_mask(planned, beam_threshold)
+
+    num_proj = error.shape[0]
+    global_mae = error.mean(axis=1)
+    beam_mae = np.full(num_proj, np.nan)
+    background_mae = np.full(num_proj, np.nan)
+
+    for row in range(num_proj):
+        row_beam = beam_mask[row]
+        if row_beam.any():
+            beam_mae[row] = error[row, row_beam].mean()
+        if (~row_beam).any():
+            background_mae[row] = error[row, ~row_beam].mean()
+
+    projections = np.arange(num_proj)
+
+    plt.figure(figsize=(14, 6))
+
+    plt.plot(projections, global_mae, color="black", linewidth=1.5, label="Global MAE")
+    plt.plot(projections, beam_mae, color="red", linewidth=1.5, label="Beam MAE")
+    plt.plot(
+        projections, background_mae, color="dodgerblue", linewidth=1.5,
+        label="Background MAE",
+    )
+
+    plt.xlabel("Projection")
+    plt.ylabel("MAE")
+    plt.title(f"Projection-wise MAE ({patient_id})", fontsize=15, fontweight="bold")
+    plt.legend()
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
     plt.show()
 
 

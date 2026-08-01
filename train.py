@@ -47,6 +47,7 @@ from configs.config import (
     SIGMOID_OUTPUT_SAVE_PATH,
     DEEP_SUPERVISION_SAVE_PATH,
     MULTI_SCALE_LOSS_SAVE_PATH,
+    BEAM_WEIGHTED_SAVE_PATH,
     LOSS_TYPE,
     OUTPUT_ACTIVATION,
     USE_DEEP_SUPERVISION,
@@ -91,12 +92,15 @@ def main():
     parser.add_argument("--data-path", default=DATA_PATH,
                          help=f"Path to processed_data.pkl (default: {DATA_PATH}).")
     parser.add_argument("--loss-type", default=LOSS_TYPE,
-                         choices=["l1", "weighted_l1", "huber_gradient"],
+                         choices=["l1", "weighted_l1", "huber_gradient", "beam_weighted"],
                          help=f"Loss ablation switch (default: {LOSS_TYPE!r}). "
                               "'l1' is the unchanged baseline (WeightedHuberLoss); "
                               "'weighted_l1' selects WeightedL1Loss; "
                               "'huber_gradient' selects WeightedHuberGradientLoss "
-                              "(WeightedHuberLoss + lambda_gradient * GradientLoss).")
+                              "(WeightedHuberLoss + lambda_gradient * GradientLoss); "
+                              "'beam_weighted' selects BeamAwareWeightedHuberLoss "
+                              "(region-reweighted by a planned-derived beam mask, see "
+                              "BEAM_THRESHOLD/BEAM_WEIGHT/BACKGROUND_WEIGHT).")
     parser.add_argument("--save-path", default=None,
                          help="Where to save the best checkpoint. Defaults to "
                               f"{SAVE_PATH!r} for --loss-type l1, "
@@ -131,6 +135,7 @@ def main():
         "l1": SAVE_PATH,
         "weighted_l1": WEIGHTED_L1_SAVE_PATH,
         "huber_gradient": HUBER_GRADIENT_SAVE_PATH,
+        "beam_weighted": BEAM_WEIGHTED_SAVE_PATH,
     }
     save_path = (
         args.save_path

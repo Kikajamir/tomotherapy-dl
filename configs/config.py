@@ -117,7 +117,9 @@ OUTPUT_ACTIVATION = "linear"  # "linear" or "sigmoid"
 # True, i.e. never at inference/eval), and the training loop adds
 # 0.5 * L_decoder2 + 0.25 * L_decoder3 on top of the main loss -- see
 # model/generator.py (`aux_outputs`) and training/train.py.
-USE_DEEP_SUPERVISION = True
+# Evaluated and found not to improve performance -- back to False (no
+# aux heads, stock Attention U-Net) to match the current baseline.
+USE_DEEP_SUPERVISION = False
 
 # ---------------------------------------------------------------------
 # Multi-scale loss ablation (Experiment C)
@@ -146,16 +148,63 @@ LOSS_GAMMA = 2.5
 
 # ---------------------------------------------------------------------
 # Loss selection (ablation study: baseline vs. Weighted L1 vs.
-# Huber + Gradient)
+# Huber + Gradient vs. Beam-Aware Weighted Huber)
 # ---------------------------------------------------------------------
 # "l1" keeps the existing baseline loss (WeightedHuberLoss, untouched,
 # see LOSS_DELTA/ALPHA/GAMMA above) so the default training behavior is
 # unchanged; "weighted_l1" switches to WeightedL1Loss (previous
 # experiment); "huber_gradient" switches to WeightedHuberGradientLoss
 # (WeightedHuberLoss + lambda_gradient * GradientLoss, current
-# experiment).
-LOSS_TYPE = "huber_gradient"  # "l1", "weighted_l1", or "huber_gradient"
+# baseline); "beam_weighted" switches to BeamAwareWeightedHuberLoss (see
+# BEAM_THRESHOLD/BEAM_WEIGHT/BACKGROUND_WEIGHT below).
+LOSS_TYPE = "beam_weighted"  # "l1", "weighted_l1", "huber_gradient", or "beam_weighted"
 WEIGHTED_L1_ALPHA = 2.0
+
+# ---------------------------------------------------------------------
+# Beam-aware weighted Huber loss ablation ("beam_weighted")
+# ---------------------------------------------------------------------
+# EDA showed background pixels (planned == 0) make up the large majority
+# of the sinogram, while the planned sinogram already tells us exactly
+# where beam exists -- so the beam mask is derived from `planned` only
+# (never from the detector/target, which wouldn't be available at
+# inference time). BEAM_THRESHOLD=0.0 is the physically exact choice:
+# `planned` is a treatment-plan fluence value with no measurement noise,
+# so it is exactly zero wherever no beam was ever planned and non-zero
+# everywhere beam exists -- no epsilon guessing needed.
+#
+# Loss = BEAM_WEIGHT * WeightedHuber(beam pixels)
+#      + BACKGROUND_WEIGHT * WeightedHuber(background pixels)
+#      + LOSS_GRADIENT_LAMBDA * GradientLoss(full image)
+#
+# Each region's WeightedHuber term is normalized by its OWN pixel count
+# (unlike a single pixel-wise .mean()), so the ~5x larger background
+# population can no longer dilute the beam region's gradient signal by
+# sheer pixel count the way it does under the existing losses above.
+# BACKGROUND_WEIGHT < 1 de-emphasizes (but does not zero out) the
+# background term, since the background target isn't exactly zero
+# either (small but consistent positive pedestal in the real data).
+BEAM_THRESHOLD = 0.0
+BEAM_WEIGHT = 1.0
+BACKGROUND_WEIGHT = 0.3
+
+# Beam intensity weighting inside the beam region: "binary" reproduces
+# the original beam_weighted behavior exactly (every beam pixel counted
+# equally in the beam-region mean); "continuous" additionally multiplies
+# each beam pixel's Huber loss by `1 + BEAM_ALPHA * planned**BEAM_GAMMA`
+# before averaging, so higher-fluence (near-peak) pixels get more say in
+# the beam-region mean -- real planned leaf-open-time is a continuum
+# (empirically spread across the full [0,1] range, not bimodal), so this
+# is the more physically faithful option, but "binary" stays the default
+# to keep the simplest ablation (region-normalization alone, no extra
+# hyperparameters) as the zero-config baseline.
+BEAM_WEIGHT_MODE = "continuous"  # "binary" or "continuous"
+
+# Defaults match LOSS_ALPHA/LOSS_GAMMA above so this continuous
+# planned-intensity weighting operates on a comparable scale to the
+# existing target-magnitude weighting in WeightedHuberLoss; tune
+# independently as needed.
+BEAM_ALPHA = 11.0
+BEAM_GAMMA = 2.5
 
 # Weight of the image-gradient term added on top of the unchanged
 # WeightedHuberLoss: TotalLoss = WeightedHuberLoss + LOSS_GRADIENT_LAMBDA
@@ -173,6 +222,7 @@ HUBER_GRADIENT_SAVE_PATH = "experiments/huber_gradient/best_generator_residual.p
 SIGMOID_OUTPUT_SAVE_PATH = "experiments/sigmoid_output/best_generator_residual.pth"
 DEEP_SUPERVISION_SAVE_PATH = "experiments/deep_supervision/best_generator_residual.pth"
 MULTI_SCALE_LOSS_SAVE_PATH = "experiments/multi_scale_loss/best_generator_residual.pth"
+BEAM_WEIGHTED_SAVE_PATH = "experiments/beam_weighted/best_generator_residual.pth"
 
 # ---------------------------------------------------------------------
 # Patient-wise train / val / test split

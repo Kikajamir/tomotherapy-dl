@@ -47,6 +47,7 @@ from model.losses import (
     WeightedL1Loss,
     WeightedHuberGradientLoss,
     MultiScaleLoss,
+    BeamAwareWeightedHuberLoss,
 )
 
 
@@ -197,9 +198,13 @@ def build_criterion(loss_type=LOSS_TYPE, use_multi_scale_loss=USE_MULTI_SCALE_LO
     Loss-function ablation switch: "l1" keeps the existing baseline loss
     (WeightedHuberLoss, unchanged); "weighted_l1" selects WeightedL1Loss;
     "huber_gradient" selects WeightedHuberGradientLoss (WeightedHuberLoss
-    + lambda_gradient * GradientLoss). `use_multi_scale_loss=True`
-    (Experiment C, independent of `loss_type`) selects MultiScaleLoss
-    instead. Nothing else about the training pipeline changes.
+    + lambda_gradient * GradientLoss); "beam_weighted" selects
+    BeamAwareWeightedHuberLoss (region-reweighted by a planned-derived
+    beam mask -- note its `forward` takes `planned` as a third argument,
+    see the `requires_planned` branch in `train()` below).
+    `use_multi_scale_loss=True` (Experiment C, independent of
+    `loss_type`) selects MultiScaleLoss instead. Nothing else about the
+    training pipeline changes.
     """
     if use_multi_scale_loss:
         return MultiScaleLoss()
@@ -209,10 +214,12 @@ def build_criterion(loss_type=LOSS_TYPE, use_multi_scale_loss=USE_MULTI_SCALE_LO
         return WeightedL1Loss()
     elif loss_type == "huber_gradient":
         return WeightedHuberGradientLoss()
+    elif loss_type == "beam_weighted":
+        return BeamAwareWeightedHuberLoss()
     else:
         raise ValueError(
             f"Unknown loss_type: {loss_type!r} "
-            "(expected 'l1', 'weighted_l1', or 'huber_gradient')"
+            "(expected 'l1', 'weighted_l1', 'huber_gradient', or 'beam_weighted')"
         )
 
 
@@ -268,6 +275,8 @@ def train(
             leave=False,
         )
 
+        requires_planned = getattr(criterion, "requires_planned", False)
+
         for planned, residual in train_bar:
             planned = planned.to(device, non_blocking=True)
             residual = residual.to(device, non_blocking=True)
@@ -280,9 +289,21 @@ def train(
                 enabled=use_amp,
             ):
                 predicted_residual = generator(planned)
-                loss = criterion(predicted_residual, residual)
 
-                if use_deep_supervision and generator.aux_outputs is not None:
+                if requires_planned:
+                    loss = criterion(predicted_residual, residual, planned)
+                else:
+                    loss = criterion(predicted_residual, residual)
+
+                # Deep supervision + beam-aware loss is not a supported
+                # combination (ablations are evaluated independently) --
+                # skip the aux terms rather than crash if both happen to
+                # be enabled at once.
+                if (
+                    use_deep_supervision
+                    and not requires_planned
+                    and generator.aux_outputs is not None
+                ):
                     aux2, aux3 = generator.aux_outputs
 
                     padded_residual = F.pad(
@@ -310,11 +331,14 @@ def train(
         generator.eval()
 
         log_components = hasattr(criterion, "component_losses")
+        log_region_components = hasattr(criterion, "region_component_losses")
 
         running_val_loss = 0.0
         running_val_mae = 0.0
         running_val_huber = 0.0
         running_val_gradient = 0.0
+        running_val_beam = 0.0
+        running_val_background = 0.0
 
         with torch.no_grad():
             for planned, residual in val_loader:
@@ -333,6 +357,15 @@ def train(
                             criterion.component_losses(predicted_residual, residual)
                         )
                         running_val_huber += huber_component.item()
+                        running_val_gradient += gradient_component.item()
+                    elif log_region_components:
+                        loss, beam_component, background_component, gradient_component = (
+                            criterion.region_component_losses(
+                                predicted_residual, residual, planned
+                            )
+                        )
+                        running_val_beam += beam_component.item()
+                        running_val_background += background_component.item()
                         running_val_gradient += gradient_component.item()
                     else:
                         loss = criterion(predicted_residual, residual)
@@ -372,6 +405,22 @@ def train(
                 f"Train {epoch_train_loss:.6f} | "
                 f"Val Total {epoch_val_loss:.6f} | "
                 f"Val Huber {epoch_val_huber:.6f} | "
+                f"Val Gradient {epoch_val_gradient:.6f} | "
+                f"Val MAE {epoch_val_mae:.6f} | "
+                f"LR {current_lr:.2e} "
+                f"{model_status}"
+            )
+        elif log_region_components:
+            epoch_val_beam = running_val_beam / len(val_loader)
+            epoch_val_background = running_val_background / len(val_loader)
+            epoch_val_gradient = running_val_gradient / len(val_loader)
+
+            print(
+                f"Epoch {epoch+1:03d} | "
+                f"Train {epoch_train_loss:.6f} | "
+                f"Val Total {epoch_val_loss:.6f} | "
+                f"Val Beam {epoch_val_beam:.6f} | "
+                f"Val Background {epoch_val_background:.6f} | "
                 f"Val Gradient {epoch_val_gradient:.6f} | "
                 f"Val MAE {epoch_val_mae:.6f} | "
                 f"LR {current_lr:.2e} "

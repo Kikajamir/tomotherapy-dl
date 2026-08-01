@@ -21,6 +21,8 @@ from model.losses import (
     GradientLoss,
     WeightedHuberGradientLoss,
     MultiScaleLoss,
+    BeamAwareWeightedHuberLoss,
+    build_beam_mask,
 )
 from training.train import build_criterion
 
@@ -256,3 +258,227 @@ def test_build_criterion_multi_scale_loss_overrides_loss_type():
 def test_build_criterion_default_multi_scale_loss_is_off():
     criterion = build_criterion(loss_type="l1")
     assert not isinstance(criterion, MultiScaleLoss)
+
+
+def test_build_beam_mask_uses_planned_only():
+    planned = torch.tensor([[0.0, 0.5, 0.0, 1.0]])
+    # target/pred are deliberately unrelated to planned's zero pattern --
+    # the mask must not be influenced by them in any way.
+    target = torch.tensor([[5.0, -5.0, 3.0, -1.0]])
+
+    mask = build_beam_mask(planned, threshold=0.0)
+
+    assert mask.tolist() == [[False, True, False, True]]
+
+    # Changing target/pred must not change the mask.
+    mask_again = build_beam_mask(planned, threshold=0.0)
+    assert torch.equal(mask, mask_again)
+
+
+def test_build_beam_mask_works_on_numpy_arrays():
+    planned = np.array([[0.0, 0.02, 0.0]], dtype=np.float32)
+    mask = build_beam_mask(planned, threshold=0.01)
+    assert mask.tolist() == [[False, True, False]]
+
+
+def test_beam_aware_loss_is_zero_for_perfect_prediction():
+    criterion = BeamAwareWeightedHuberLoss()
+    planned = torch.rand(2, 1, 8, 8)
+    target = torch.rand(2, 1, 8, 8)
+    loss = criterion(target, target, planned)
+    assert torch.isclose(loss, torch.tensor(0.0), atol=1e-6)
+
+
+def test_beam_aware_loss_requires_planned_flag_is_set():
+    criterion = BeamAwareWeightedHuberLoss()
+    assert criterion.requires_planned is True
+
+
+def test_beam_aware_loss_matches_manual_formula():
+    criterion = BeamAwareWeightedHuberLoss(
+        beam_threshold=0.0, beam_weight=1.0, background_weight=0.3,
+        lambda_gradient=0.1,
+    )
+
+    planned = torch.tensor([[0.0, 0.5, 0.0, 1.0]] * 4).unsqueeze(0).unsqueeze(0)
+    target = torch.rand(1, 1, 4, 4)
+    pred = target + 0.05 * torch.randn(1, 1, 4, 4)
+
+    mask = planned > 0.0
+    huber = WeightedHuberLoss()
+    beam_component = huber(pred[mask], target[mask])
+    background_component = huber(pred[~mask], target[~mask])
+    gradient_component = GradientLoss()(pred, target)
+
+    expected = 1.0 * beam_component + 0.3 * background_component + 0.1 * gradient_component
+
+    total, beam, background, gradient = criterion.region_component_losses(pred, target, planned)
+
+    assert torch.isclose(total, expected, atol=1e-5)
+    assert torch.isclose(beam, beam_component, atol=1e-6)
+    assert torch.isclose(background, background_component, atol=1e-6)
+    assert torch.isclose(gradient, gradient_component, atol=1e-6)
+    assert torch.isclose(criterion(pred, target, planned), expected, atol=1e-5)
+
+
+def test_beam_aware_loss_background_weight_zero_ignores_background_errors():
+    # lambda_gradient=0.0 isolates the Huber term's region-weighting from
+    # GradientLoss, which is intentionally computed over the *full* image
+    # (per the Task 2 spec) and would otherwise also react to the sharp
+    # background/beam boundary this test introduces.
+    criterion = BeamAwareWeightedHuberLoss(background_weight=0.0, lambda_gradient=0.0)
+
+    planned = torch.zeros(1, 1, 4, 4)
+    planned[..., 2:] = 1.0  # right half is beam, left half is background
+
+    target = torch.zeros(1, 1, 4, 4)
+
+    pred_good_background = target.clone()
+    pred_bad_background = target.clone()
+    pred_bad_background[..., :2] = 5.0  # large error, but only in background
+
+    loss_good = criterion(pred_good_background, target, planned)
+    loss_bad = criterion(pred_bad_background, target, planned)
+
+    assert torch.isclose(loss_good, loss_bad, atol=1e-6)
+
+
+def test_beam_aware_loss_beam_weight_scales_beam_contribution():
+    planned = torch.zeros(1, 1, 4, 4)
+    planned[..., 2:] = 1.0
+
+    target = torch.zeros(1, 1, 4, 4)
+    pred = target.clone()
+    pred[..., 2:] = 0.2  # error only in the beam region
+
+    low_weight = BeamAwareWeightedHuberLoss(beam_weight=1.0, background_weight=0.0, lambda_gradient=0.0)
+    high_weight = BeamAwareWeightedHuberLoss(beam_weight=2.0, background_weight=0.0, lambda_gradient=0.0)
+
+    loss_low = low_weight(pred, target, planned)
+    loss_high = high_weight(pred, target, planned)
+
+    assert torch.isclose(loss_high, 2.0 * loss_low, atol=1e-6)
+
+
+def test_build_criterion_beam_weighted_returns_beam_aware_loss():
+    assert isinstance(build_criterion("beam_weighted"), BeamAwareWeightedHuberLoss)
+
+
+def test_weighted_huber_elementwise_mean_matches_forward():
+    # Refactor equivalence: forward() must still be exactly
+    # elementwise(...).mean(), for every existing loss/experiment that
+    # depends on WeightedHuberLoss (huber_gradient, beam_weighted).
+    criterion = WeightedHuberLoss()
+    pred = torch.rand(3, 1, 10, 12)
+    target = torch.rand(3, 1, 10, 12)
+
+    assert torch.isclose(
+        criterion(pred, target), criterion.elementwise(pred, target).mean(), atol=1e-7
+    )
+
+
+def test_beam_aware_loss_default_mode_is_binary():
+    criterion = BeamAwareWeightedHuberLoss()
+    assert criterion.beam_weight_mode == "binary"
+
+
+def test_beam_aware_loss_rejects_unknown_weight_mode():
+    with pytest.raises(ValueError):
+        BeamAwareWeightedHuberLoss(beam_weight_mode="bogus")
+
+
+def test_beam_aware_loss_continuous_mode_with_zero_alpha_matches_binary():
+    planned = torch.zeros(1, 1, 4, 4)
+    planned[..., 2:] = 1.0
+
+    target = torch.rand(1, 1, 4, 4)
+    pred = target + 0.1 * torch.randn(1, 1, 4, 4)
+
+    binary = BeamAwareWeightedHuberLoss(beam_weight_mode="binary")
+    continuous_zero_alpha = BeamAwareWeightedHuberLoss(
+        beam_weight_mode="continuous", beam_alpha=0.0
+    )
+
+    total_binary, beam_binary, bg_binary, grad_binary = binary.region_component_losses(
+        pred, target, planned
+    )
+    total_cont, beam_cont, bg_cont, grad_cont = continuous_zero_alpha.region_component_losses(
+        pred, target, planned
+    )
+
+    assert torch.isclose(total_binary, total_cont, atol=1e-6)
+    assert torch.isclose(beam_binary, beam_cont, atol=1e-6)
+    assert torch.isclose(bg_binary, bg_cont, atol=1e-6)
+
+
+def test_beam_aware_loss_continuous_mode_matches_manual_formula():
+    beam_threshold = 0.0
+    beam_alpha = 2.0
+    beam_gamma = 2.0
+
+    planned = torch.tensor([[0.0, 0.3, 0.0, 0.9]] * 4).unsqueeze(0).unsqueeze(0)
+    target = torch.rand(1, 1, 4, 4)
+    pred = target + 0.05 * torch.randn(1, 1, 4, 4)
+
+    criterion = BeamAwareWeightedHuberLoss(
+        beam_threshold=beam_threshold, beam_weight_mode="continuous",
+        beam_alpha=beam_alpha, beam_gamma=beam_gamma, lambda_gradient=0.0,
+        beam_weight=1.0, background_weight=1.0,
+    )
+
+    mask = planned > beam_threshold
+    elementwise = WeightedHuberLoss().elementwise(pred, target)
+    beam_weight_map = 1.0 + beam_alpha * planned.clamp(min=0.0).pow(beam_gamma)
+    weighted_elementwise = beam_weight_map * elementwise
+
+    expected_beam = weighted_elementwise[mask].mean()
+    expected_background = weighted_elementwise[~mask].mean()
+
+    total, beam, background, _ = criterion.region_component_losses(pred, target, planned)
+
+    assert torch.isclose(beam, expected_beam, atol=1e-6)
+    assert torch.isclose(background, expected_background, atol=1e-6)
+    assert torch.isclose(total, expected_beam + expected_background, atol=1e-6)
+
+
+def test_beam_aware_loss_continuous_mode_upweights_higher_planned_pixels():
+    # Two beam pixels with the same error but different planned
+    # intensity -- the higher-planned one should be weighted more in
+    # continuous mode, so isolating it into "beam" via a mask that only
+    # includes it should show a bigger beam_loss than the low-planned one.
+    low_planned = torch.full((1, 1, 2, 2), 0.1)
+    high_planned = torch.full((1, 1, 2, 2), 0.9)
+
+    target = torch.zeros(1, 1, 2, 2)
+    pred = torch.full((1, 1, 2, 2), 0.1)  # identical error in both cases
+
+    criterion = BeamAwareWeightedHuberLoss(
+        beam_threshold=0.0, beam_weight_mode="continuous",
+        beam_alpha=11.0, beam_gamma=2.5, lambda_gradient=0.0,
+    )
+
+    _, beam_low, _, _ = criterion.region_component_losses(pred, target, low_planned)
+    _, beam_high, _, _ = criterion.region_component_losses(pred, target, high_planned)
+
+    assert beam_high.item() > beam_low.item()
+
+
+def test_beam_aware_loss_continuous_mode_is_noop_outside_beam():
+    # planned == 0 in the background under the default threshold, so
+    # beam_weight_map == 1 there regardless of BEAM_ALPHA/BEAM_GAMMA --
+    # continuous mode must not change background_loss vs. binary mode.
+    planned = torch.zeros(1, 1, 4, 4)
+    planned[..., 2:] = 1.0
+
+    target = torch.rand(1, 1, 4, 4)
+    pred = target + 0.2 * torch.randn(1, 1, 4, 4)
+
+    binary = BeamAwareWeightedHuberLoss(beam_weight_mode="binary")
+    continuous = BeamAwareWeightedHuberLoss(
+        beam_weight_mode="continuous", beam_alpha=11.0, beam_gamma=2.5
+    )
+
+    _, _, bg_binary, _ = binary.region_component_losses(pred, target, planned)
+    _, _, bg_continuous, _ = continuous.region_component_losses(pred, target, planned)
+
+    assert torch.isclose(bg_binary, bg_continuous, atol=1e-6)
